@@ -23,7 +23,7 @@ def build_dispatcher() -> ToolDispatcher:
     ``FreeCADRPC`` is reached through its class, matching the instance the
     XML-RPC endpoint registers; both endpoints therefore run the same code.
     """
-    return ToolDispatcher(invoke_rpc)
+    return ToolDispatcher(invoke_rpc, capture=capture_view)
 
 
 def invoke_rpc(name: str, kwargs: dict) -> Any:
@@ -39,6 +39,15 @@ def invoke_rpc(name: str, kwargs: dict) -> Any:
         raise AttributeError(f"FreeCADRPC has no method {name}")
 
     return method(FreeCADRPC(), **kwargs)
+
+
+def capture_view(view_name: str) -> Any:
+    """A base64 PNG of the named view, or None when it cannot be captured."""
+    import FreeCAD
+
+    if not FreeCAD.GuiUp:
+        return None
+    return invoke_rpc("get_active_screenshot", {"view_name": view_name})
 
 
 def handle_tools_call(payload: dict) -> dict:

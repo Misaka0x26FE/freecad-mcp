@@ -33,7 +33,8 @@ the transport changes nothing about that.
 
 ## Status
 
-**Phase 1 — transport only, and only tested without FreeCAD.**
+**Phases 1–3 — transport, wiring and content modes, verified against a real
+FreeCAD 1.1.3 GUI.**
 
 Present:
 
@@ -42,7 +43,11 @@ Present:
 - `addon/FreeCADMCP/mcp_http/security.py` — IP allowlist, bearer token,
   browser guard, body limits
 - `addon/FreeCADMCP/mcp_http/transport.py` — the HTTP listener
-- `tests/test_mcp_http_transport.py` — 46 tests, none of which need FreeCAD
+- `addon/FreeCADMCP/mcp_http/tools.py` — tool schemas and `content_mode`
+- `addon/FreeCADMCP/mcp_http/content.py` — image content and its degradation
+- `addon/FreeCADMCP/mcp_http/gui_bridge.py` — the layer that reaches FreeCAD
+- `addon/FreeCADMCP/mcp_http/server.py` — start/stop and settings
+- `docs/http-endpoint.md` — starting it, client JSON, content modes
 
 Endpoints on one listener:
 
@@ -52,12 +57,29 @@ Endpoints on one listener:
 | `GET /mcp` | `405`, with `Allow: POST` — this server offers no server-to-client stream |
 | `DELETE /mcp` | `405`, there are no sessions to end |
 
-Not present yet: the GUI-side wiring that routes `tools/call` through
-`dispatch_to_gui`, tool schema generation, and the FreeCAD toolbar command.
+**Phase 3 — content modes, verified against a real FreeCAD 1.1.3 GUI.**
 
-**Nothing here has been run against a real FreeCAD.** The transport takes an
-injected handler precisely so the protocol, admission and routing layers can be
-tested in isolation — which also means the integration is still unproven.
+Tool calls have been exercised end to end under FreeCAD 1.1.3 with `GuiUp=1`:
+`execute_code` builds real geometry (a 40×30×20 box returns its exact 24 000 mm³
+volume and 6 faces), documents are created and listed, and the three content
+modes return real PNG captures. 334 tests pass.
+
+Three bugs were only reachable this way and are fixed:
+
+- the transport blocked on a read longer than the peer would ever send, which
+  pinned a worker thread until the socket timeout instead of answering
+- `stop()` deadlocked when no serve loop was running, because `shutdown()`
+  waits on an event `serve_forever` is the only thing to set
+- the bridge deadlocked the GUI thread by dispatching work the RPC layer had
+  already dispatched itself
+
+`fc_gui_e2e.py` and `fc_mm_test.py` in the repository root carry the GUI
+checks; they need a display but nothing else.
+
+## Documents
+
+[docs/http-endpoint.md](docs/http-endpoint.md) covers starting the endpoint,
+client configuration in JSON, the content modes, and what it does not change.
 
 ## Design notes
 

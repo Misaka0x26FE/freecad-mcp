@@ -8,6 +8,31 @@ injected, which keeps the schema and the routing testable headlessly.
 
 from typing import Any, Callable
 
+from mcp_http.content import (
+    CONTENT_MODES,
+    TEXT,
+    attach_images,
+    image_result,
+    normalise_mode,
+)
+
+# Tools where attaching a screenshot would be wasteful or misleading: the
+# screenshot request is itself the capture, and the parts/library queries have
+# no viewport to illustrate.
+_NEVER_CAPTURE = frozenset({"get_active_screenshot", "get_parts_list"})
+
+# Offered on every tool, so a client can ask for a picture of whatever it just
+# changed without knowing which tool it used.
+_CONTENT_MODE_PROPERTY = {
+    "type": "string",
+    "enum": list(CONTENT_MODES),
+    "description": (
+        "How much to return: 'text' for the result alone, 'image' to add one "
+        "isometric screenshot, 'multimodal' to add three views. Missing images "
+        "are reported in the response rather than dropped silently."
+    ),
+}
+
 # JSON Schema for one tool, derived from the FreeCADRPC signature and docstring.
 # Kept deliberately small: enough for a client to call the tool correctly,
 # without restating types the addon validates anyway.
@@ -137,6 +162,11 @@ _TOOLS: list[dict] = [
 
 TOOLS_BY_NAME: dict[str, dict] = {tool["name"]: tool for tool in _TOOLS}
 
+# content_mode is handled by this layer rather than by any RPC method, so it is
+# added to every schema here instead of being declared on each tool by hand.
+for _tool in _TOOLS:
+    _tool["inputSchema"]["properties"]["content_mode"] = _CONTENT_MODE_PROPERTY
+
 
 def list_tools() -> list[dict]:
     """Every tool this endpoint offers."""
@@ -149,6 +179,8 @@ def _coerce_arguments(tool_name: str, arguments: dict) -> dict:
     The addon methods have their own defaults; passing an unknown keyword would
     raise TypeError deep inside the GUI thread, so they are dropped here where
     the mistake can still be reported to the caller.
+
+    content_mode is handled by this layer and must not reach the method.
     """
     spec = TOOLS_BY_NAME.get(tool_name)
     if spec is None:
@@ -167,20 +199,29 @@ def _coerce_arguments(tool_name: str, arguments: dict) -> dict:
     return {
         key: value
         for key, value in arguments.items()
-        if key in properties and value is not None
+        if key in properties and value is not None and key != "content_mode"
     }
 
 
 class ToolDispatcher:
     """Routes a tools/call to an injected callable and shapes the result.
 
-    ``invoke`` is expected to run the call on whatever thread is correct for
-    it -- in the addon that is ``dispatch_to_gui``. Keeping that behind one
-    argument is what lets this class be tested without FreeCAD.
+    ``invoke`` is expected to run the call the way the addon needs -- in
+    practice that means letting FreeCADRPC dispatch itself onto the GUI thread.
+    Keeping that behind one argument is what lets this class be tested without
+    FreeCAD.
+
+    ``capture`` produces a base64 PNG for a view name. It is optional: without
+    it a request asking for images degrades to text rather than failing.
     """
 
-    def __init__(self, invoke: Callable[[str, dict], Any]) -> None:
+    def __init__(
+        self,
+        invoke: Callable[[str, dict], Any],
+        capture: Callable[[str], Any] | None = None,
+    ) -> None:
         self._invoke = invoke
+        self._capture = capture
 
     def list_tools(self) -> list[dict]:
         return list_tools()
@@ -189,6 +230,7 @@ class ToolDispatcher:
         params = payload.get("params") or {}
         name = params.get("name")
         arguments = params.get("arguments") or {}
+        mode = normalise_mode(arguments.get("content_mode"))
 
         if name not in TOOLS_BY_NAME:
             return error_result(f"unknown tool: {name}")
@@ -206,7 +248,23 @@ class ToolDispatcher:
             # error: the call itself succeeded, the operation did not.
             return error_result(f"{type(exc).__name__}: {exc}")
 
-        return to_result(value)
+        # The screenshot tool's whole result is a PNG. Rendering it as text
+        # would hand the caller a wall of base64 to decode itself.
+        if name == "get_active_screenshot":
+            shaped = image_result(value)
+            if shaped is not None:
+                return shaped
+
+        result = to_result(value)
+        if mode == TEXT or name in _NEVER_CAPTURE:
+            # A screenshot request is the capture; attaching another one would
+            # spend a viewport capture to illustrate a screenshot.
+            return result
+        return attach_images(result, mode, self._capture or _no_capture)
+
+
+def _no_capture(view: str) -> None:
+    return None
 
 
 def to_result(value: Any) -> dict:

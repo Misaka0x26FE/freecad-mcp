@@ -1,57 +1,62 @@
-"""Bridge from an HTTP tools/call to the FreeCAD GUI thread.
+"""Bridge from an HTTP tools/call to FreeCAD.
 
-The only module here that imports FreeCAD. Everything above it -- transport,
-security, tools -- stays importable without it, which is what lets the
-protocol and routing be tested headlessly.
+The only module here that imports FreeCAD, and it does so lazily inside the
+call, which keeps the transport, security and tools layers importable without
+FreeCAD so the protocol and routing stay testable headlessly.
 
-Nothing here improves on the XML-RPC path's threading: App::Document,
-ViewObject and Coin3D can only be touched from the main thread, so a call
-arriving over HTTP dispatches exactly the way a call arriving over XML-RPC
-does. Changing the transport changes nothing about that.
+Deliberately does *not* dispatch to the GUI thread itself. The FreeCADRPC
+methods already do: create_document, get_objects, execute_code and the rest
+each queue their own work on the GUI thread and wait for it. Wrapping them in
+another dispatch_to_gui deadlocks -- the outer task occupies the only thread
+that drains the queue while the inner one waits for a task that can never be
+reached. A real FreeCAD hung for the full 60 s timeout before this was caught.
 """
 
 from typing import Any
 
 from mcp_http.tools import ToolDispatcher, to_result
 
-# How long a single tool call may occupy the GUI thread, in seconds. Matches
-# the XML-RPC endpoint's default so behaviour is comparable between them.
-DEFAULT_GUI_TIMEOUT = 60
 
+def build_dispatcher() -> ToolDispatcher:
+    """A ToolDispatcher whose calls reach FreeCAD.
 
-def build_dispatcher(gui_timeout: int = DEFAULT_GUI_TIMEOUT) -> ToolDispatcher:
-    """A ToolDispatcher whose calls run on the GUI thread.
-
-    ``FreeCADRPC`` is imported lazily and reached through its module instance
-    rather than a fresh one, so the HTTP endpoint shares the same object the
-    XML-RPC endpoint serves.
+    ``FreeCADRPC`` is reached through its class, matching the instance the
+    XML-RPC endpoint registers; both endpoints therefore run the same code.
     """
-    return ToolDispatcher(lambda name, kwargs: invoke_on_gui(name, kwargs, gui_timeout))
+    return ToolDispatcher(invoke_rpc)
 
 
-def invoke_on_gui(name: str, kwargs: dict, gui_timeout: int = DEFAULT_GUI_TIMEOUT) -> Any:
-    """Run one RPC method on the GUI thread and return its value."""
-    from rpc_server import rpc_server
-    from rpc_server.gui_dispatch import dispatch_to_gui
+def invoke_rpc(name: str, kwargs: dict) -> Any:
+    """Call one FreeCADRPC method and return its value.
 
-    rpc = rpc_server.FreeCADRPC()
-    method = getattr(rpc, name, None)
+    Called from the HTTP worker thread. The method moves itself onto the GUI
+    thread as needed, so there is nothing to wrap it in here.
+    """
+    from rpc_server.rpc_server import FreeCADRPC
+
+    method = getattr(FreeCADRPC, name, None)
     if method is None or not callable(method):
         raise AttributeError(f"FreeCADRPC has no method {name}")
 
-    return dispatch_to_gui(
-        lambda: method(**kwargs),
-        timeout=gui_timeout,
-        operation_name=name,
-    )
+    return method(FreeCADRPC(), **kwargs)
 
 
-def handle_tools_call(payload: dict, gui_timeout: int = DEFAULT_GUI_TIMEOUT) -> dict:
-    """Entry point for HTTPServerTransport: a tools/call request in, MCP tool
-    result out.
+def handle_tools_call(payload: dict) -> dict:
+    """Entry point for HTTPServerTransport: a tools/call request in, an MCP
+    tool result out.
 
-    Never raises. A GUI-dispatch timeout comes back as an error result rather
-    than an exception, because the HTTP call did succeed -- the operation did
-    not, and the client needs to be told which.
+    Never raises. dispatch_to_gui signals failure by returning a value rather
+    than by raising, and the RPC methods turn that into a Fault, so both
+    shapes end up as an MCP tool error: the HTTP call did succeed even when the
+    operation did not, and the client needs to be able to tell them apart.
     """
-    return build_dispatcher(gui_timeout)(payload)
+    try:
+        return build_dispatcher()(payload)
+    except Exception as exc:
+        return {
+            "content": [{"type": "text", "text": f"{type(exc).__name__}: {exc}"}],
+            "isError": True,
+        }
+
+
+__all__ = ["build_dispatcher", "invoke_rpc", "handle_tools_call", "to_result"]

@@ -213,9 +213,54 @@ class ToggleAutoStartCommand:
         return True
 
 
+class StartHTTPCommand:
+    """Start the addon's own Streamable HTTP MCP endpoint on 9876."""
+
+    def GetResources(self):
+        return {
+            "MenuText": "Start MCP HTTP Server",
+            "ToolTip": "Serve MCP over Streamable HTTP on port 9876",
+        }
+
+    def Activated(self, checked: int = 0) -> None:
+        try:
+            from mcp_http import server as http_server
+            msg = http_server.start_http_server()
+        except Exception as exc:
+            _report_server_command(
+                f"MCP HTTP Server failed to start: {type(exc).__name__}: {exc}", error=True
+            )
+            return
+        _report_server_command(msg)
+
+    def IsActive(self):
+        return True
+
+
+class StopHTTPCommand:
+    def GetResources(self):
+        return {"MenuText": "Stop MCP HTTP Server", "ToolTip": "Stop the HTTP MCP endpoint"}
+
+    def Activated(self, checked: int = 0) -> None:
+        try:
+            from mcp_http import server as http_server
+            msg = http_server.stop_http_server()
+        except Exception as exc:
+            _report_server_command(
+                f"MCP HTTP Server failed to stop: {type(exc).__name__}: {exc}", error=True
+            )
+            return
+        _report_server_command(msg)
+
+    def IsActive(self):
+        return True
+
+
 def register_commands() -> None:
     FreeCADGui.addCommand("Start_RPC_Server", StartRPCServerCommand())
     FreeCADGui.addCommand("Stop_RPC_Server", StopRPCServerCommand())
+    FreeCADGui.addCommand("Start_MCP_HTTP_Server", StartHTTPCommand())
+    FreeCADGui.addCommand("Stop_MCP_HTTP_Server", StopHTTPCommand())
     FreeCADGui.addCommand("Toggle_Auto_Start", ToggleAutoStartCommand())
     FreeCADGui.addCommand("Toggle_Remote_Connections", ToggleRemoteConnectionsCommand())
     FreeCADGui.addCommand("Configure_Allowed_IPs", ConfigureAllowedIPsCommand())
